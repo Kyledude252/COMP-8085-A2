@@ -51,7 +51,7 @@ print(f"Training data shape: {X_train_text.shape}")
 print(f"Testing data shape: {X_test_text.shape}")
 
 # Select 'stars' as the target
-y_train_stars = y_train[:, 0]  # First column corresponds to 'stars'
+y_train_stars = y_train[:, 0]
 y_test_stars = y_test[:, 0]
 
 rf = RandomForestClassifier(n_estimators=100, random_state=123)

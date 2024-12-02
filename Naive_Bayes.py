@@ -51,27 +51,14 @@ print(f"Training data shape: {X_train_text.shape}")
 print(f"Testing data shape: {X_test_text.shape}")
 
 # Select 'stars' as the target
-y_train_stars = y_train[:, 0]  # First column corresponds to 'stars'
+y_train_stars = y_train[:, 0]
 y_test_stars = y_test[:, 0]
 
-# Train a Multinomial Naive Bayes model
 nb_model = MultinomialNB()
 nb_model.fit(X_train_text, y_train_stars)
 
 # Make predictions
 y_pred = nb_model.predict(X_test_text)
-y_true = y_test[:, 0]  # Actual 'stars' values
 
-report = classification_report(y_true, y_pred, target_names=['1 star', '2 stars', '3 stars', '4 stars', '5 stars'])
+report = classification_report(y_test_stars, y_pred, target_names=['1 star', '2 stars', '3 stars', '4 stars', '5 stars'])
 print(report)
-
-# Calculate exact-match accuracy
-#exact_accuracy = (y_pred == y_true).mean() * 100
-#print(f"Exact Match Accuracy for 'stars': {exact_accuracy:.2f}%")
-
-# Evaluate the model
-#mse = mean_squared_error(y_test_stars, y_pred)
-#print(f"Mean Squared Error for 'stars': {mse}")
-
-#print(train.head())
-#print(test.head())
