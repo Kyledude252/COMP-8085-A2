@@ -1,5 +1,3 @@
-# yelp_sentiment_analysis.py
-
 import json
 import re
 import string
@@ -42,10 +40,11 @@ processed_records = []
 with open('yelp_academic_dataset_review.json', 'r', encoding='utf-8') as f:
     for line in f:
         record = process_line(line)
-        if 'stars' in record:
+        # Check if all required labels are present
+        if all(k in record for k in ['stars', 'useful', 'funny', 'cool']):
             processed_records.append(record)
         # Limit the number of records for faster training (e.g., first 10,000 reviews)
-        if len(processed_records) >= 10000:
+        if len(processed_records) >= 50000:
             break
 
 # Tokenize texts
@@ -96,12 +95,17 @@ class YelpReviewDataset(Dataset):
             indices += [self.vocab['<PAD>']] * (self.max_seq_len - len(indices))
         # Convert to tensor
         text_tensor = torch.tensor(indices, dtype=torch.long)
-        # Get labels (assuming 'stars' is always present in training data)
-        stars = torch.tensor(record['stars'], dtype=torch.float)
-        return text_tensor, stars
+        # Get labels (assuming all labels are present)
+        labels = torch.tensor([
+            record['stars'],
+            record['useful'],
+            record['funny'],
+            record['cool']
+        ], dtype=torch.float)
+        return text_tensor, labels
 
 # Create DataLoaders
-def create_dataloaders(train_records, val_records, vocab, batch_size=32):
+def create_dataloaders(train_records, val_records, vocab, batch_size=64):
     train_dataset = YelpReviewDataset(train_records, vocab)
     val_dataset = YelpReviewDataset(val_records, vocab)
     
@@ -110,43 +114,47 @@ def create_dataloaders(train_records, val_records, vocab, batch_size=32):
     
     return train_loader, val_loader
 
-train_loader, val_loader = create_dataloaders(train_records, val_records, vocab, batch_size=128)
+train_loader, val_loader = create_dataloaders(train_records, val_records, vocab, batch_size=64)
 
 # Define the neural network model
-class SimpleSentimentNN(nn.Module):
+class MultiOutputNN(nn.Module):
     def __init__(self, vocab_size, embed_size, output_size):
-        super(SimpleSentimentNN, self).__init__()
+        super(MultiOutputNN, self).__init__()
         self.embedding = nn.Embedding(vocab_size, embed_size, padding_idx=0)
-        self.fc = nn.Linear(embed_size, output_size)
+        self.fc1 = nn.Linear(embed_size, 64)
+        self.fc2 = nn.Linear(64, output_size)
+        self.dropout = nn.Dropout(0.5)
         
     def forward(self, x):
         # x shape: (batch_size, max_seq_len)
         embeds = self.embedding(x)  # (batch_size, max_seq_len, embed_size)
         # Average pooling over sequence length
         pooled = embeds.mean(dim=1)  # (batch_size, embed_size)
-        out = self.fc(pooled)  # (batch_size, output_size)
-        return out.squeeze()
+        out = F.relu(self.fc1(pooled))
+        out = self.dropout(out)
+        out = self.fc2(out)  # (batch_size, output_size)
+        return out  # No need to squeeze since output is (batch_size, output_size)
 
 # Instantiate the model
 vocab_size = len(vocab)
-embed_size = 256  # You can adjust this value
-output_size = 1   # Predicting a single value (e.g., stars rating)
+embed_size = 128  # You can adjust this value
+output_size = 4   # Predicting four values: stars, useful, funny, cool
 
-model = SimpleSentimentNN(vocab_size, embed_size, output_size)
+model = MultiOutputNN(vocab_size, embed_size, output_size)
 
 # Define loss function and optimizer
 criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 # Training loop
 def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=5):
     for epoch in range(num_epochs):
         model.train()
         train_losses = []
-        for texts, stars in train_loader:
+        for texts, labels in train_loader:
             optimizer.zero_grad()
             outputs = model(texts)
-            loss = criterion(outputs, stars)
+            loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
             train_losses.append(loss.item())
@@ -156,9 +164,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         model.eval()
         val_losses = []
         with torch.no_grad():
-            for texts, stars in val_loader:
+            for texts, labels in val_loader:
                 outputs = model(texts)
-                loss = criterion(outputs, stars)
+                loss = criterion(outputs, labels)
                 val_losses.append(loss.item())
         avg_val_loss = sum(val_losses) / len(val_losses)
         
@@ -173,12 +181,18 @@ def evaluate_model(model, data_loader):
     predictions = []
     actuals = []
     with torch.no_grad():
-        for texts, stars in data_loader:
+        for texts, labels in data_loader:
             outputs = model(texts)
             predictions.extend(outputs.numpy())
-            actuals.extend(stars.numpy())
-    mse = mean_squared_error(actuals, predictions)
-    print(f'MSE on validation set: {mse:.4f}')
+            actuals.extend(labels.numpy())
+    predictions = np.array(predictions)
+    actuals = np.array(actuals)
+    # Calculate MSE for each output
+    mse_values = ((predictions - actuals) ** 2).mean(axis=0)
+    print(f'MSE on validation set: Stars: {mse_values[0]:.4f}, Useful: {mse_values[1]:.4f}, Funny: {mse_values[2]:.4f}, Cool: {mse_values[3]:.4f}')
+
+# Import numpy for evaluation
+import numpy as np
 
 # Run evaluation
 evaluate_model(model, val_loader)
