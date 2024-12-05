@@ -1,6 +1,7 @@
 import json
 from collections import Counter
 import nltk
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,6 +9,7 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from nltk.tokenize import word_tokenize
 from sklearn.metrics import accuracy_score, classification_report
+from sklearn.utils.class_weight import compute_class_weight
 
 nltk.download('punkt')
 nltk.download('punkt_tab')
@@ -39,7 +41,7 @@ with open('yelp_academic_dataset_review.json', 'r', encoding='utf-8') as f:
         if len(processed_records) >= 10000:
             break
 
-# Build the vocabulary
+# Builds vocabulary of word tokens based on review text
 def build_vocab(tokenized_texts, max_vocab_size=5000):
     word_counts = Counter()
     for tokens in tokenized_texts:
@@ -49,6 +51,7 @@ def build_vocab(tokenized_texts, max_vocab_size=5000):
     vocab = {word: idx + 2 for idx, (word, _) in enumerate(most_common_words)}
     vocab['<PAD>'] = 0  # Padding token
     vocab['<UNK>'] = 1  # Unknown word token
+
     return vocab
 
 # Function to convert text to indices
@@ -60,7 +63,7 @@ def tokenize_and_index(record, vocab):
 
 
 # Bins for each of the useful, funny, cool upvote categories.
-def bin_count(count):
+def bin_upvote_counts(count):
     if count == 0:          # 0 Upvotes
         return 0
     elif 1 <= count <= 3:   # 1-3 Upvotes
@@ -69,6 +72,16 @@ def bin_count(count):
         return 2
     else:
         return 3            # 6+ Upvotes 
+    
+def bin_stars(original_label):
+    if original_label in [0, 1]:  # Combine 1-star and 2-star reviews
+        return 0
+    elif original_label == 2:     # 3-star reviews
+        return 1
+    elif original_label == 3:     # 4-star reviews
+        return 2
+    elif original_label == 4:     # 5-star reviews
+        return 3
 
 # Define the Dataset class
 class YelpReviewDataset(Dataset):
@@ -93,11 +106,12 @@ class YelpReviewDataset(Dataset):
         text_tensor = torch.tensor(indices, dtype=torch.long)
         # Prepare labels
         # For 'stars', adjust to zero-based indexing for classification (labels from 0 to 4)
-        stars_label = int(record['stars']) - 1  # Adjust stars to 0-4
+        stars_label = int(record['stars']) - 1
+        stars_label = bin_stars(stars_label)
         # Classification labels for 'useful', 'funny', 'cool'
-        useful_label = bin_count(record['useful'])
-        funny_label = bin_count(record['funny'])
-        cool_label = bin_count(record['cool'])
+        useful_label = bin_upvote_counts(record['useful'])
+        funny_label = bin_upvote_counts(record['funny'])
+        cool_label = bin_upvote_counts(record['cool'])
         # Combine labels into a tensor
         labels = torch.tensor([stars_label, useful_label, funny_label, cool_label], dtype=torch.long)
         return text_tensor, labels
@@ -140,86 +154,88 @@ class YelpSentimentNeuralNetwork(nn.Module):
         cool_logits = self.fc_cool(out)
         return stars_logits, useful_logits, funny_logits, cool_logits
 
-# Instantiate the model
-
+def get_upvote_class_weights(records,label_key):
+    bins = [bin_upvote_counts(record[label_key]) for record in records]
+    class_weights = compute_class_weight(class_weight='balanced', classes=np.array([0, 1, 2, 3]), y=bins)
+    return torch.tensor(class_weights, dtype=torch.float)
 
 # Training loop
-def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=5):
+def train_model(model, train_loader, val_loader, criterion_stars, criterion_useful, criterion_funny, criterion_cool, optimizer, num_epochs=5):
     for epoch in range(num_epochs):
         model.train()
         train_losses = []
-        correct_stars = 0
-        correct_useful = 0
-        correct_funny = 0
-        correct_cool = 0
+        correct_stars = correct_useful = correct_funny = correct_cool = 0
         total = 0
         for texts, labels in train_loader:
             optimizer.zero_grad()
             stars_logits, useful_logits, funny_logits, cool_logits = model(texts)
-            # Compute losses
-            loss_stars = criterion(stars_logits, labels[:, 0])
-            loss_useful = criterion(useful_logits, labels[:, 1])
-            loss_funny = criterion(funny_logits, labels[:, 2])
-            loss_cool = criterion(cool_logits, labels[:, 3])
+            # Use separate weighted criteria
+            loss_stars = criterion_stars(stars_logits, labels[:,0])
+            loss_useful = criterion_useful(useful_logits, labels[:,1])
+            loss_funny = criterion_funny(funny_logits, labels[:,2])
+            loss_cool = criterion_cool(cool_logits, labels[:,3])
+            
             loss = loss_stars + loss_useful + loss_funny + loss_cool
             loss.backward()
             optimizer.step()
             train_losses.append(loss.item())
-            # Compute training accuracy
+
+            # Accuracy
             _, predicted_stars = torch.max(stars_logits.data, 1)
             _, predicted_useful = torch.max(useful_logits.data, 1)
             _, predicted_funny = torch.max(funny_logits.data, 1)
             _, predicted_cool = torch.max(cool_logits.data, 1)
             total += labels.size(0)
-            correct_stars += (predicted_stars == labels[:, 0]).sum().item()
-            correct_useful += (predicted_useful == labels[:, 1]).sum().item()
-            correct_funny += (predicted_funny == labels[:, 2]).sum().item()
-            correct_cool += (predicted_cool == labels[:, 3]).sum().item()
-        avg_train_loss = sum(train_losses) / len(train_losses)
+            correct_stars += (predicted_stars == labels[:,0]).sum().item()
+            correct_useful += (predicted_useful == labels[:,1]).sum().item()
+            correct_funny += (predicted_funny == labels[:,2]).sum().item()
+            correct_cool += (predicted_cool == labels[:,3]).sum().item()
+        avg_train_loss = sum(train_losses)/len(train_losses)
         train_acc_stars = correct_stars / total
         train_acc_useful = correct_useful / total
         train_acc_funny = correct_funny / total
         train_acc_cool = correct_cool / total
-        
+
         # Validation
         model.eval()
         val_losses = []
-        val_correct_stars = 0
-        val_correct_useful = 0
-        val_correct_funny = 0
-        val_correct_cool = 0
+        val_correct_stars = val_correct_useful = val_correct_funny = val_correct_cool = 0
         val_total = 0
         with torch.no_grad():
             for texts, labels in val_loader:
                 stars_logits, useful_logits, funny_logits, cool_logits = model(texts)
-                # Compute losses
-                loss_stars = criterion(stars_logits, labels[:, 0])
-                loss_useful = criterion(useful_logits, labels[:, 1])
-                loss_funny = criterion(funny_logits, labels[:, 2])
-                loss_cool = criterion(cool_logits, labels[:, 3])
+                # Validation also uses the separate criteria
+                loss_stars = criterion_stars(stars_logits, labels[:,0])
+                loss_useful = criterion_useful(useful_logits, labels[:,1])
+                loss_funny = criterion_funny(funny_logits, labels[:,2])
+                loss_cool = criterion_cool(cool_logits, labels[:,3])
+
                 loss = loss_stars + loss_useful + loss_funny + loss_cool
                 val_losses.append(loss.item())
+
                 # Compute validation accuracy
                 _, predicted_stars = torch.max(stars_logits.data, 1)
                 _, predicted_useful = torch.max(useful_logits.data, 1)
                 _, predicted_funny = torch.max(funny_logits.data, 1)
                 _, predicted_cool = torch.max(cool_logits.data, 1)
                 val_total += labels.size(0)
-                val_correct_stars += (predicted_stars == labels[:, 0]).sum().item()
-                val_correct_useful += (predicted_useful == labels[:, 1]).sum().item()
-                val_correct_funny += (predicted_funny == labels[:, 2]).sum().item()
-                val_correct_cool += (predicted_cool == labels[:, 3]).sum().item()
-        avg_val_loss = sum(val_losses) / len(val_losses)
+                val_correct_stars += (predicted_stars == labels[:,0]).sum().item()
+                val_correct_useful += (predicted_useful == labels[:,1]).sum().item()
+                val_correct_funny += (predicted_funny == labels[:,2]).sum().item()
+                val_correct_cool += (predicted_cool == labels[:,3]).sum().item()
+
+        avg_val_loss = sum(val_losses)/len(val_losses)
         val_acc_stars = val_correct_stars / val_total
         val_acc_useful = val_correct_useful / val_total
         val_acc_funny = val_correct_funny / val_total
         val_acc_cool = val_correct_cool / val_total
-        
+
         print(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}')
         print(f'Train Acc - Stars: {train_acc_stars:.4f}, Useful: {train_acc_useful:.4f}, Funny: {train_acc_funny:.4f}, Cool: {train_acc_cool:.4f}')
         print(f'Val Loss: {avg_val_loss:.4f}')
         print(f'Val Acc - Stars: {val_acc_stars:.4f}, Useful: {val_acc_useful:.4f}, Funny: {val_acc_funny:.4f}, Cool: {val_acc_cool:.4f}')
-        print('-' * 80)
+        print('-'*80)
+
 
 
 # Evaluate the model
@@ -249,7 +265,7 @@ def evaluate_model_with_classification_summary(model, data_loader):
             cool_predictions.extend(predicted_cool.numpy())
             cool_actuals.extend(labels[:, 3].numpy())
 
-    star_targets = ['1','2','3','4','5']
+    star_targets = ['1-2','3','4','5']
     upvote_bin_targets = ['0', '1-3', '4-5', '6+']
 
     # Print detailed classification reports
@@ -264,10 +280,10 @@ def evaluate_model_with_classification_summary(model, data_loader):
 
 
 tokenized_texts = [word_tokenize(record['text']) for record in processed_records]
-vocab = build_vocab(tokenized_texts, max_vocab_size=5000)
+vocab = build_vocab(tokenized_texts, max_vocab_size=10000)
 
 vocab_size = len(vocab)
-embed_size = 128  
+embed_size = 256  
 num_classes_stars = 5   
 num_classes_useful = 4  
 num_classes_funny = 4
@@ -275,11 +291,20 @@ num_classes_cool = 4
 
 neuralNetworkModel = YelpSentimentNeuralNetwork(vocab_size, embed_size, num_classes_stars, num_classes_useful, num_classes_funny, num_classes_cool)
 
-criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(neuralNetworkModel.parameters(), lr=0.001)
 
+useful_weights = get_upvote_class_weights(processed_records, "useful")
+funny_weights = get_upvote_class_weights(processed_records, "funny")
+cool_weights = get_upvote_class_weights(processed_records, "cool")
+
+criterion_stars = nn.CrossEntropyLoss()
+criterion_useful = nn.CrossEntropyLoss(weight=useful_weights)
+criterion_funny = nn.CrossEntropyLoss(weight=funny_weights)
+criterion_cool = nn.CrossEntropyLoss(weight=cool_weights)
+
+optimizer = torch.optim.Adam(neuralNetworkModel.parameters(), lr=0.001)
 
 train_records, val_records = train_test_split(processed_records, test_size=0.2, random_state=42)
 train_loader, val_loader = create_dataloaders(train_records, val_records, vocab, batch_size=64)
-train_model(neuralNetworkModel, train_loader, val_loader, criterion, optimizer, num_epochs=5)
+
+train_model(neuralNetworkModel, train_loader, val_loader, criterion_stars, criterion_useful, criterion_funny, criterion_cool, optimizer, num_epochs=10)
 evaluate_model_with_classification_summary(neuralNetworkModel, val_loader)
