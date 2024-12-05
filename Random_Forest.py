@@ -6,6 +6,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.multioutput import MultiOutputClassifier
 from sklearn.metrics import mean_squared_error, classification_report
 import re
+from joblib import dump
 
 datafile = "reduced_data.json"
 important_fields = ["stars", "useful", "funny", "cool", "text"]
@@ -55,6 +56,11 @@ print(f"Testing data shape: {X_test_text.shape}")
 print("Training MultiOutput RandomForestClassifier...")
 multi_rf = MultiOutputClassifier(RandomForestClassifier(n_estimators=50, random_state=123, n_jobs=-1))
 multi_rf.fit(X_train_text, y_train)
+
+# Save the trained model and vectorizer
+dump(multi_rf, "Random Forest Pickled/multi_rf_model.joblib")
+dump(vectorizer, "Random Forest Pickled/vectorizer.joblib")
+print("Model and vectorizer saved successfully.")
 
 # Make predictions
 y_pred = multi_rf.predict(X_test_text)
