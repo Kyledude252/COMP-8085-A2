@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 from collections import Counter
 import nltk
 import numpy as np
@@ -301,19 +302,43 @@ print("Using device:", device)
 
 start_time = time.time()
 
-processed_train_records = []
-with open(datafile, 'r', encoding='utf-8') as f:
-    for line in f:
-        record = process_line(line)
-        if all(k in record for k in ['stars', 'useful', 'funny', 'cool']):
-            processed_train_records.append(record)
+# Training
+if args.cache and os.path.exists(tokenized_cache_file):
+    print("Loading TRAINING Cache JSON")
+    with open(tokenized_cache_file, 'r', encoding='utf-8') as f:
+        processed_train_records = json.load(f)
+else:
+    processed_train_records = []
+    with open(datafile, 'r', encoding='utf-8') as f:
+        for line in f:
+            record = process_line(line)
+            if all(k in record for k in ['stars', 'useful', 'funny', 'cool']):
+                record["tokens"] = word_tokenize(record["text"])
+                processed_train_records.append(record)
+    if args.cache:
+        print("Saving training data to JSON Cache")
+        with open(tokenized_cache_file, 'w', encoding='utf-8') as out_f:
+            json.dump(processed_train_records, out_f)
 
-processed_test_records = []
-with open(test_datafile, 'r', encoding='utf-8') as f:
-    for line in f:
-        record = process_line(line)
-        if all(k in record for k in ['stars', 'useful', 'funny', 'cool']):
-            processed_test_records.append(record)
+
+# Test
+if args.cache and os.path.exists(tokenized_test_cache_file):
+    print("Loading TEST Cache JSON")
+    with open(tokenized_test_cache_file, 'r', encoding='utf-8') as f:
+        processed_test_records = json.load(f)
+else:
+    processed_test_records = []
+    with open(test_datafile, 'r', encoding='utf-8') as f:
+        for line in f:
+            record = process_line(line)
+            if all(k in record for k in ['stars', 'useful', 'funny', 'cool']):
+                record["tokens"] = word_tokenize(record["text"])
+                processed_test_records.append(record)
+    # Optionally save to cache for next time
+    if args.cache:
+        print("Saving test data to cached JSON")
+        with open(tokenized_test_cache_file, 'w', encoding='utf-8') as out_f:
+            json.dump(processed_test_records, out_f)
 
 tokenized_texts = [word_tokenize(record['text']) for record in processed_train_records]
 vocab = build_vocab(tokenized_texts, max_vocab_size=5000)
