@@ -74,7 +74,7 @@ def train():
 
     # Calculate Mean Squared Errors
     mse_scores = {}
-    for column in y_train.columns:  # Now y_train.columns will work
+    for column in y_test.columns:
         mse_scores[column] = mean_squared_error(y_test[column], y_pred_df[column])
 
     # Print Mean Squared Errors
@@ -84,7 +84,7 @@ def train():
 
     # Print Classification Reports
     print("\nClassification Reports:")
-    for column in y_train.columns:
+    for column in y_test.columns:
         print(f"\n{column.capitalize()} Classification Report:")
         print(classification_report(y_test[column], y_pred_df[column], zero_division=0))
     
@@ -117,17 +117,21 @@ def inference():
     y_pred = multi_rf.predict(X_inference)
 
     # Combine predictions with input data
-    output_df = pd.concat([df[['text', 'stars', 'useful', 'funny', 'cool']], 
-                           pd.DataFrame(y_pred, columns=["predicted_stars", "predicted_useful", "predicted_funny", "predicted_cool"])], axis=1)
+    output_df = pd.concat([df[['text', 'stars', 'useful', 'funny', 'cool']], pd.DataFrame(y_pred, columns=["predicted_stars", "predicted_useful", "predicted_funny", "predicted_cool"])], axis=1)
 
     # Generate classification report for each target
+    mse_scores = {}  # To store MSE for each target
     print("\nClassification Reports:")
     for target in ["stars", "useful", "funny", "cool"]:
         true_labels = df[target]
         predicted_labels = output_df[f"predicted_{target}"]
         print(f"\n{target.capitalize()} Classification Report:")
         print(classification_report(true_labels, predicted_labels, zero_division=0))
+        mse_scores[target] = mean_squared_error(true_labels, predicted_labels)
 
+    print("\nMean Squared Errors:")
+    for target, mse in mse_scores.items():
+        print(f"{target}: {mse}")
     
     
 if __name__ == "__main__":
