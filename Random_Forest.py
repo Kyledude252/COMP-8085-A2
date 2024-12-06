@@ -9,6 +9,7 @@ import re
 from joblib import dump, load
 
 datafile = "reduced_data.json"
+test_datafile = "test_data.jsonl"
 model_path = "random_forest_model.joblib"
 vectorizer_path = "random_forest_vectorizer.joblib"
 important_fields = ["stars", "useful", "funny", "cool", "text"]
@@ -99,7 +100,7 @@ def inference():
 
     # Read and process inference data
     records = []
-    with open("test_data.json", 'r', encoding='utf-8') as file:
+    with open(test_datafile, 'r', encoding='utf-8') as file:
         for line in file:
             records.append(process_line(line))
     df = pd.DataFrame(records)
