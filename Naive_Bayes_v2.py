@@ -6,12 +6,17 @@ from sklearn.naive_bayes import MultinomialNB
 from sklearn.metrics import classification_report
 import re
 import numpy as np
+import nltk
 
-#datafile = "reduced_data.json"
-datafile = "yelp_academic_dataset_review.json"
+nltk.download('stopwords')
+from nltk.corpus import stopwords
+
+datafile = "reduced_data.json"
+#datafile = "yelp_academic_dataset_review.json"
 important_fields = ["stars", "useful", "funny", "cool", "text"]
 unimportant_fields = ["review_id", "user_id", "business_id", "date"]
 
+# **** DATA PROCESSING ****
 #process a single line of the json data and return it
 def process_line(line):
     #read line to dictionary
@@ -24,8 +29,12 @@ def process_line(line):
     #convert text to lowercase
     record["text"] = record["text"].lower()
     
-    #Remove special characters (Worse result when extra characters were removed)
-    #record["text"] = re.sub(r'[^\w\s]', '', record["text"])
+    #Remove special characters
+    record["text"] = re.sub(r'[^\w\s]', '', record["text"])
+    
+    #Remove stopwords
+    stop_words = set(stopwords.words('english'))
+    record["text"] = ' '.join([word for word in record["text"].split() if word not in stop_words])
     
     return record
 
@@ -38,9 +47,12 @@ with open(datafile, 'r', encoding='utf-8') as file:
         
 df = pd.DataFrame(records)
 
+print("Dataset Saved")
+
 #split data into training and testing data
 train, test = train_test_split(df, test_size=0.2, random_state=123)
 
+# **** VECTORIZER ****
 vectorizer = TfidfVectorizer(max_features=10000, ngram_range=(1, 2))
 
 X_train_text = vectorizer.fit_transform(train['text'])
@@ -52,7 +64,7 @@ y_test = test[['stars', 'useful', 'funny', 'cool']].values
 print(f"Training data shape: {X_train_text.shape}")
 print(f"Testing data shape: {X_test_text.shape}")
 
-# Select 'stars' as the target
+# Select targets
 y_train_stars = y_train[:, 0]
 y_test_stars = y_test[:, 0]
 
@@ -90,11 +102,41 @@ class NaiveBayes:
             predictions.append(max(log_probs, key=log_probs.get))
         return predictions
 
-nb_model = NaiveBayes()
-nb_model.fit(X_train_text, y_train_stars)
+# list of target fields for text to classify
+target_fields = ["stars", "useful", "funny", "cool"]
 
-# Make predictions
-y_pred = nb_model.predict(X_test_text)
+def group_classes(y):
+    """
+    Maps all classes greater than 5 to 6.
+    """
+    y = np.array(y)
+    y = np.where(y > 5, 6, y)
+    return y
 
-report = classification_report(y_test_stars, y_pred, target_names=['1 star', '2 stars', '3 stars', '4 stars', '5 stars'])
-print(report)
+# process reports
+for i, field in enumerate(target_fields):
+    print(f"\n--- Classification Report for '{field}' ---")
+    
+    # Select the target column and group classes
+    y_train_field = group_classes(y_train[:, i])
+    y_test_field = group_classes(y_test[:, i])
+    
+    # Train a new Naive Bayes model
+    nb_model = NaiveBayes()
+    nb_model.fit(X_train_text, y_train_field)
+    
+    # Make predictions
+    y_pred_field = nb_model.predict(X_test_text)
+    
+    # Generate and print the classification report
+    unique_labels = np.unique(y_test_field)
+    target_names = [f"{int(label)}" for label in unique_labels]
+    
+    # Rename the last label to "6+" if it exists
+    if "6" in target_names:
+        target_names[-1] = "6+"
+    
+    report = classification_report(
+        y_test_field, y_pred_field, target_names=target_names, zero_division=0
+    )
+    print(report)
