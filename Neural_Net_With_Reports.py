@@ -1,18 +1,27 @@
+import argparse
 import json
 from collections import Counter
 import nltk
 import numpy as np
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from nltk.tokenize import word_tokenize
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score, classification_report, mean_squared_error
 from sklearn.utils.class_weight import compute_class_weight
 
 nltk.download('punkt')
 nltk.download('punkt_tab')
+
+datafile = "reduced_data.json"
+test_datafile = "test_data.jsonl"
+
+# FOR CACHING TOKEN RESULTS
+tokenized_cache_file = "processed_train_records_tokenized.json"
+tokenized_test_cache_file = "processed_test_records_tokenized.json"
 
 important_fields = ["stars", "useful", "funny", "cool", "text"]
 unimportant_fields = ["review_id", "user_id", "business_id", "date"]
@@ -29,17 +38,6 @@ def process_line(line):
     #record["text"] = re.sub(r'[^\w\s]', '', record["text"])
     
     return record
-
-processed_records = []
-with open('yelp_academic_dataset_review.json', 'r', encoding='utf-8') as f:
-    for line in f:
-        record = process_line(line)
-
-        if all(k in record for k in ['stars', 'useful', 'funny', 'cool']):
-            processed_records.append(record)
-
-        if len(processed_records) >= 10000:
-            break
 
 # Builds vocabulary of word tokens based on review text
 def build_vocab(tokenized_texts, max_vocab_size=5000):
@@ -95,24 +93,23 @@ class YelpReviewDataset(Dataset):
     
     def __getitem__(self, idx):
         record = self.records[idx]
-        # Convert text to indices
+
         indices = tokenize_and_index(record, self.vocab)
         # Truncate or pad sequences
         if len(indices) > self.max_seq_len:
             indices = indices[:self.max_seq_len]
         else:
             indices += [self.vocab['<PAD>']] * (self.max_seq_len - len(indices))
-        # Convert to tensor
+
         text_tensor = torch.tensor(indices, dtype=torch.long)
-        # Prepare labels
-        # For 'stars', adjust to zero-based indexing for classification (labels from 0 to 4)
+
         stars_label = int(record['stars']) - 1
         stars_label = bin_stars(stars_label)
-        # Classification labels for 'useful', 'funny', 'cool'
+
         useful_label = bin_upvote_counts(record['useful'])
         funny_label = bin_upvote_counts(record['funny'])
         cool_label = bin_upvote_counts(record['cool'])
-        # Combine labels into a tensor
+
         labels = torch.tensor([stars_label, useful_label, funny_label, cool_label], dtype=torch.long)
         return text_tensor, labels
 
@@ -141,12 +138,11 @@ class YelpSentimentNeuralNetwork(nn.Module):
         self.fc_cool = nn.Linear(64, num_classes_cool)
     
     def forward(self, x):
-        # x shape: (batch_size, max_seq_len)
-        embeds = self.embedding(x)  # (batch_size, max_seq_len, embed_size)
-        # Average pooling over sequence length
-        pooled = embeds.mean(dim=1)  # (batch_size, embed_size)
+        embeds = self.embedding(x)
+        pooled = embeds.mean(dim=1)  
         out = F.relu(self.fc_common(pooled))
         out = self.dropout(out)
+
         # Outputs for each target
         stars_logits = self.fc_stars(out)
         useful_logits = self.fc_useful(out)
@@ -160,16 +156,17 @@ def get_upvote_class_weights(records,label_key):
     return torch.tensor(class_weights, dtype=torch.float)
 
 # Training loop
-def train_model(model, train_loader, val_loader, criterion_stars, criterion_useful, criterion_funny, criterion_cool, optimizer, num_epochs=5):
+def train_model(model, train_loader, val_loader, criterion_stars, criterion_useful, criterion_funny, criterion_cool, optimizer, num_epochs=5, device=torch.device('cpu')):
     for epoch in range(num_epochs):
         model.train()
         train_losses = []
         correct_stars = correct_useful = correct_funny = correct_cool = 0
         total = 0
         for texts, labels in train_loader:
+            texts, labels = texts.to(device), labels.to(device)
             optimizer.zero_grad()
             stars_logits, useful_logits, funny_logits, cool_logits = model(texts)
-            # Use separate weighted criteria
+            
             loss_stars = criterion_stars(stars_logits, labels[:,0])
             loss_useful = criterion_useful(useful_logits, labels[:,1])
             loss_funny = criterion_funny(funny_logits, labels[:,2])
@@ -180,7 +177,6 @@ def train_model(model, train_loader, val_loader, criterion_stars, criterion_usef
             optimizer.step()
             train_losses.append(loss.item())
 
-            # Accuracy
             _, predicted_stars = torch.max(stars_logits.data, 1)
             _, predicted_useful = torch.max(useful_logits.data, 1)
             _, predicted_funny = torch.max(funny_logits.data, 1)
@@ -190,6 +186,7 @@ def train_model(model, train_loader, val_loader, criterion_stars, criterion_usef
             correct_useful += (predicted_useful == labels[:,1]).sum().item()
             correct_funny += (predicted_funny == labels[:,2]).sum().item()
             correct_cool += (predicted_cool == labels[:,3]).sum().item()
+        
         avg_train_loss = sum(train_losses)/len(train_losses)
         train_acc_stars = correct_stars / total
         train_acc_useful = correct_useful / total
@@ -203,8 +200,9 @@ def train_model(model, train_loader, val_loader, criterion_stars, criterion_usef
         val_total = 0
         with torch.no_grad():
             for texts, labels in val_loader:
+                texts, labels = texts.to(device), labels.to(device)
                 stars_logits, useful_logits, funny_logits, cool_logits = model(texts)
-                # Validation also uses the separate criteria
+                
                 loss_stars = criterion_stars(stars_logits, labels[:,0])
                 loss_useful = criterion_useful(useful_logits, labels[:,1])
                 loss_funny = criterion_funny(funny_logits, labels[:,2])
@@ -213,7 +211,6 @@ def train_model(model, train_loader, val_loader, criterion_stars, criterion_usef
                 loss = loss_stars + loss_useful + loss_funny + loss_cool
                 val_losses.append(loss.item())
 
-                # Compute validation accuracy
                 _, predicted_stars = torch.max(stars_logits.data, 1)
                 _, predicted_useful = torch.max(useful_logits.data, 1)
                 _, predicted_funny = torch.max(funny_logits.data, 1)
@@ -239,7 +236,7 @@ def train_model(model, train_loader, val_loader, criterion_stars, criterion_usef
 
 
 # Evaluate the model
-def evaluate_model_with_classification_summary(model, data_loader):
+def evaluate_model_with_classification_summary(model, data_loader, device):
     model.eval()
     stars_predictions, stars_actuals = [], []
     useful_predictions, useful_actuals = [], []
@@ -248,27 +245,25 @@ def evaluate_model_with_classification_summary(model, data_loader):
 
     with torch.no_grad():
         for texts, labels in data_loader:
+            texts, labels = texts.to(device), labels.to(device)
             stars_logits, useful_logits, funny_logits, cool_logits = model(texts)
-            # Predictions for each output
             _, predicted_stars = torch.max(stars_logits.data, 1)
             _, predicted_useful = torch.max(useful_logits.data, 1)
             _, predicted_funny = torch.max(funny_logits.data, 1)
             _, predicted_cool = torch.max(cool_logits.data, 1)
             
-            # Collect predictions and actuals
-            stars_predictions.extend(predicted_stars.numpy())
-            stars_actuals.extend(labels[:, 0].numpy())
-            useful_predictions.extend(predicted_useful.numpy())
-            useful_actuals.extend(labels[:, 1].numpy())
-            funny_predictions.extend(predicted_funny.numpy())
-            funny_actuals.extend(labels[:, 2].numpy())
-            cool_predictions.extend(predicted_cool.numpy())
-            cool_actuals.extend(labels[:, 3].numpy())
+            stars_predictions.extend(predicted_stars.cpu().numpy())
+            stars_actuals.extend(labels[:, 0].cpu().numpy())
+            useful_predictions.extend(predicted_useful.cpu().numpy())
+            useful_actuals.extend(labels[:, 1].cpu().numpy())
+            funny_predictions.extend(predicted_funny.cpu().numpy())
+            funny_actuals.extend(labels[:, 2].cpu().numpy())
+            cool_predictions.extend(predicted_cool.cpu().numpy())
+            cool_actuals.extend(labels[:, 3].cpu().numpy())
 
     star_targets = ['1-2','3','4','5']
     upvote_bin_targets = ['0', '1-3', '4-5', '6+']
 
-    # Print detailed classification reports
     print("\nStars Classification Report ---")
     print(classification_report(stars_actuals, stars_predictions, target_names=star_targets, zero_division=0))
     print("\nUseful Classification Report ---")
@@ -278,23 +273,64 @@ def evaluate_model_with_classification_summary(model, data_loader):
     print("\nCool Classification Report ---")
     print(classification_report(cool_actuals, cool_predictions, target_names=upvote_bin_targets, zero_division=0))
 
+    # Calculate and print MSE for each target
+    stars_mse = mean_squared_error(stars_actuals, stars_predictions)
+    useful_mse = mean_squared_error(useful_actuals, useful_predictions)
+    funny_mse = mean_squared_error(funny_actuals, funny_predictions)
+    cool_mse = mean_squared_error(cool_actuals, cool_predictions)
 
-tokenized_texts = [word_tokenize(record['text']) for record in processed_records]
-vocab = build_vocab(tokenized_texts, max_vocab_size=10000)
+    print("\nMean Squared Errors: ---")
+    print(f"Stars MSE: {stars_mse:.4f}")
+    print(f"Useful MSE: {useful_mse:.4f}")
+    print(f"Funny MSE: {funny_mse:.4f}")
+    print(f"Cool MSE: {cool_mse:.4f}")
+
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--use_gpu', action='store_true', help='Use GPU acceleration if available')
+parser.add_argument('--cache', action='store_true', help='Use cached tokenized data if available')
+args = parser.parse_args()
+
+if args.use_gpu and torch.cuda.is_available():
+    device = torch.device('cuda')
+else:
+    device = torch.device('cpu')
+
+print("Using device:", device)
+
+start_time = time.time()
+
+processed_train_records = []
+with open(datafile, 'r', encoding='utf-8') as f:
+    for line in f:
+        record = process_line(line)
+        if all(k in record for k in ['stars', 'useful', 'funny', 'cool']):
+            processed_train_records.append(record)
+
+processed_test_records = []
+with open(test_datafile, 'r', encoding='utf-8') as f:
+    for line in f:
+        record = process_line(line)
+        if all(k in record for k in ['stars', 'useful', 'funny', 'cool']):
+            processed_test_records.append(record)
+
+tokenized_texts = [word_tokenize(record['text']) for record in processed_train_records]
+vocab = build_vocab(tokenized_texts, max_vocab_size=5000)
 
 vocab_size = len(vocab)
-embed_size = 256  
-num_classes_stars = 5   
+embed_size = 128  
+num_classes_stars = 4   
 num_classes_useful = 4  
 num_classes_funny = 4
 num_classes_cool = 4
 
 neuralNetworkModel = YelpSentimentNeuralNetwork(vocab_size, embed_size, num_classes_stars, num_classes_useful, num_classes_funny, num_classes_cool)
+neuralNetworkModel.to(device)
 
-
-useful_weights = get_upvote_class_weights(processed_records, "useful")
-funny_weights = get_upvote_class_weights(processed_records, "funny")
-cool_weights = get_upvote_class_weights(processed_records, "cool")
+useful_weights = get_upvote_class_weights(processed_train_records, "useful").to(device)
+funny_weights = get_upvote_class_weights(processed_train_records, "funny").to(device)
+cool_weights = get_upvote_class_weights(processed_train_records, "cool").to(device)
 
 criterion_stars = nn.CrossEntropyLoss()
 criterion_useful = nn.CrossEntropyLoss(weight=useful_weights)
@@ -303,8 +339,18 @@ criterion_cool = nn.CrossEntropyLoss(weight=cool_weights)
 
 optimizer = torch.optim.Adam(neuralNetworkModel.parameters(), lr=0.001)
 
-train_records, val_records = train_test_split(processed_records, test_size=0.2, random_state=42)
+train_records, val_records = train_test_split(processed_train_records, test_size=0.2, random_state=42)
 train_loader, val_loader = create_dataloaders(train_records, val_records, vocab, batch_size=64)
 
-train_model(neuralNetworkModel, train_loader, val_loader, criterion_stars, criterion_useful, criterion_funny, criterion_cool, optimizer, num_epochs=10)
-evaluate_model_with_classification_summary(neuralNetworkModel, val_loader)
+test_dataset = YelpReviewDataset(processed_test_records, vocab)
+test_loader = DataLoader(test_dataset, batch_size=64)
+
+train_model(neuralNetworkModel, train_loader, val_loader, criterion_stars, criterion_useful, criterion_funny, criterion_cool, optimizer, num_epochs=5, device=device)
+evaluate_model_with_classification_summary(neuralNetworkModel, test_loader, device)
+
+end_time = time.time()
+elapsed_time = end_time - start_time
+
+print (f"\n Start Time: {start_time:.2f}")
+print (f"\n End Time: {end_time:.2f}")
+print (f"Total runtime: {elapsed_time:.2f} seconds")
